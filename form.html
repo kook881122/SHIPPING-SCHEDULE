@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Shipping Schedule 입력</title>
+
+<style>
+/* ===== 기본 스타일 ===== */
+body { font-family:'Segoe UI',Arial,sans-serif; background:#f5f7fb; }
+.container {
+  max-width:700px; margin:30px auto; background:white;
+  padding:30px 40px; border-radius:14px;
+  box-shadow:0 4px 14px rgba(0,0,0,0.1);
+}
+h2 { margin-bottom:5px; font-size:24px; color:#333; }
+.notice { color:#d10000; font-size:14px; margin-bottom:15px; font-weight:600; }
+label { font-weight:600; margin-bottom:4px; display:block; }
+label.required { color:#d10000; }
+input[type=text], select, textarea {
+  width:100%; padding:9px 12px; border-radius:8px;
+  border:1px solid #ccc; box-sizing:border-box;
+  margin-bottom:15px; font-size:14px;
+}
+textarea { resize:vertical; }
+button {
+  background:#3064ff; color:white; padding:12px 20px;
+  border:none; border-radius:8px; font-size:15px; cursor:pointer;
+}
+button:disabled { background:#a5b8ff; cursor:not-allowed; }
+.file-area {
+  border:1px dashed #b8bec9; background:#fafcff;
+  padding:12px 14px; border-radius:8px; margin-bottom:20px;
+}
+.file-item {
+  display:flex; align-items:center; background:#f1f3f7;
+  padding:6px 8px; border-radius:6px; margin-bottom:6px;
+}
+.file-thumb {
+  width:34px; height:34px; margin-right:10px;
+  border:1px solid #ddd; border-radius:4px; object-fit:cover;
+}
+.file-remove {
+  background:#e74c3c; color:#fff; border:none;
+  padding:3px 8px; border-radius:4px; font-size:11px; cursor:pointer;
+}
+
+/* ===== 모달 ===== */
+.modal { display:none; position:fixed; left:0; top:0; width:100%; height:100%;
+  background:rgba(0,0,0,0.45); z-index:9999; }
+.modal-content {
+  background:#fff; padding:24px 26px; border-radius:12px;
+  width:720px; max-height:80vh; margin:5% auto;
+  box-shadow:0 6px 20px rgba(0,0,0,0.25);
+  animation:fadeIn .25s ease-out; overflow-y:auto; font-size:14px;
+}
+.modal-title { font-size:18px; font-weight:700; margin-bottom:12px; }
+.modal-buttons { margin-top:16px; text-align:right; }
+.modal-buttons button { margin-left:8px; }
+.summary-row { margin-bottom:4px; line-height:1.6; }
+.summary-label { font-weight:600; color:#333; }
+
+/* 애니메이션 */
+@keyframes fadeIn { from{opacity:0; transform:scale(.95);} to{opacity:1; transform:scale(1);} }
+
+</style>
+</head>
+
+<body>
+<div class="container">
+  <h2>🚢 Shipping Schedule 입력</h2>
+  <div class="notice">🔴 빨간색 항목은 필수 입력값입니다.</div>
+
+  <label>발신자 이메일(Reply-To)</label>
+  <input type="text" id="fld_sender" placeholder="여기에 입력한 주소로 답장됩니다.">
+
+  <label>이메일 제목</label>
+  <input type="text" id="fld_subject" placeholder="비워두면 'SHIPPING SCHEDULE' 로 전송됩니다.">
+
+  <label>엑셀 붙여넣기</label>
+  <textarea id="bulkInput" style="height:80px;" placeholder="엑셀 A~U열을 복사하여 붙여넣기"></textarea>
+  <button onclick="parseExcel()">붙여넣기 적용</button>
+
+  <hr style="margin:25px 0;">
+
+  <div id="formArea"></div>
+
+  <!-- ✅ 비고는 headers와 분리해서 항상 맨 아래 -->
+  <label class="required">비고 *</label>
+  <textarea id="fld_note" style="height:120px;" placeholder="담당자 이름과 연락처를 꼭 입력해주세요."></textarea>
+
+  <button id="submitBtn" onclick="submitForm()">제출하기</button>
+  <div id="waitMsg" style="display:none; margin-top:10px;">제출 준비 중입니다…</div>
+</div>
+
+<!-- 모달 -->
+<div id="confirmModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-title">제출 내용 확인</div>
+    <div id="summaryArea"></div>
+
+    <div id="confirmWait" style="display:none; margin-top:10px;">⏳ 제출 처리 중입니다…</div>
+
+    <div class="modal-buttons">
+      <button onclick="closeConfirmModal()">취소</button>
+      <button id="finalSubmitBtn" onclick="confirmSubmit()">최종 제출</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let formData = null;
+let fileStore = [];
+let pendingData = null;
+
+function toSafeId(s){ return "fld_" + s.replace(/[^a-zA-Z0-9가-힣]/g,"_"); }
+function isValidDate(v){
+  const r=/^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}$/;
+  if(!r.test(v)) return false;
+  const p=v.split(".");
+  const d=new Date(+p[0],+p[1]-1,+p[2]);
+  return d.getFullYear()==+p[0] && d.getMonth()+1==+p[1] && d.getDate()==+p[2];
+}
+function isValidEmail(v){ return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v); }
+
+google.script.run.withSuccessHandler(buildForm).loadFormData();
+
+/* -----------------------------------------------------------
+ *  폼 생성
+ * ---------------------------------------------------------*/
+function buildForm(data) {
+
+  // ✅ headers는 항목명 시트 그대로 (비고 조작 제거)
+  formData = data;
+
+  // 필수 필드 목록 (비고는 별도 textarea)
+  const required = [
+    "BULK/CNTR 구분(100)",
+    "BOOKING NO(100)",
+    "CFS(CY)코드",
+    "CALL SIGN",
+    "항구청코드",
+    "출항일(ETD)(8)"
+  ];
+
+  const dateFields = [
+    "서류마감일(100)","CARGO 마감일(8)",
+    "출항일(ETD)(8)","도착일(ETA)(8)"
+  ];
+
+  let html = "";
+
+  data.headers.forEach(function(h){
+    const id = toSafeId(h);
+    const req = required.indexOf(h) !== -1;
+    const isDate = dateFields.indexOf(h) !== -1;
+
+    html += '<label class="' + (req ? 'required' : '') + '">' + h + (req ? ' *' : '') + '</label>';
+
+    if(isDate){
+      html += '<input type="text" id="' + id + '" placeholder="2025.12.06">';
+    }
+    else if(data.codeMap && data.codeMap[h]){
+      html += '<select id="' + id + '">';
+      html += '<option value="">선택하세요</option>';
+      html += data.codeMap[h].map(function(d){
+        return '<option value="' + d.code + '">' + d.code + ' | ' + d.detail + '</option>';
+      }).join("");
+      html += '</select>';
+    }
+    else{
+      html += '<input type="text" id="' + id + '">';
+    }
+  });
+
+  /* 담당자 이메일 */
+  html += '<label class="required">담당자 이메일 *</label>';
+  html += '<select id="fld_manager_email">';
+  html += '<option value="">선택하세요</option>';
+  html += (data.managers || []).map(function(m){
+    return '<option value="' + m.email + '">' + m.team + ' - ' + m.name + '</option>';
+  }).join("");
+  html += '</select>';
+  html += '<div style="margin-top:-10px; margin-bottom:15px; font-size:13px;">';
+  html += '※ 선택한 담당자 외에 <b>물류팀 담당자</b>에게도 자동으로 메일이 전달됩니다.';
+  html += '</div>';
+
+  /* 추가 CC */
+  html += '<label>추가 이메일 수신자(CC)</label>';
+  html += '<input type="text" id="fld_extra_emails" placeholder="aaa@naver.com, bbb@gmail.com">';
+
+  /* 파일 첨부 */
+  html += '<label>파일 첨부</label>';
+  html += '<div class="file-area">';
+  html += '<input type="file" id="fld_files" multiple>';
+  html += '<div id="fileList"></div>';
+  html += '</div>';
+
+  document.getElementById("formArea").innerHTML = html;
+  initFileUI();
+}
+
+/* -----------------------------------------------------------
+ *  파일 UI
+ * ---------------------------------------------------------*/
+function initFileUI(){
+  fileStore=[];
+  renderFiles();
+
+  var f = document.getElementById("fld_files");
+  if(!f) return;
+
+  f.addEventListener("change",function(e){
+    var files = e.target.files;
+    for(var i=0;i<files.length;i++){
+      fileStore.push(files[i]);
+    }
+    e.target.value="";
+    renderFiles();
+  });
+}
+
+function renderFiles(){
+  const list=document.getElementById("fileList");
+  if(!list) return;
+
+  list.innerHTML="";
+  fileStore.forEach((f,i)=>{
+    const isImg=f.type.indexOf("image/")===0;
+    const thumb=isImg? `<img src="${URL.createObjectURL(f)}" class="file-thumb">`
+                      : `<div class="file-thumb" style="display:flex;align-items:center;justify-content:center;">📄</div>`;
+    list.innerHTML += `
+      <div class="file-item">
+        ${thumb}
+        <div style="flex:1">${f.name}</div>
+        <button class="file-remove" onclick="removeFile(${i})">삭제</button>
+      </div>
+    `;
+  });
+}
+
+function removeFile(i){
+  fileStore.splice(i,1);
+  renderFiles();
+}
+
+/* -----------------------------------------------------------
+ *  엑셀 붙여넣기
+ * ---------------------------------------------------------*/
+function parseExcel(){
+
+  // ✅ formData 아직 로드 전이면 막고 안내
+  if(!formData || !formData.headers){
+    alert("폼을 불러오는 중입니다. 잠시 후 다시 시도하세요.");
+    return;
+  }
+
+  const txt=document.getElementById("bulkInput").value.trim();
+  if(!txt) return;
+
+  const cols=txt.split("\n")[0].split("\t");
+
+  formData.headers.forEach((h,i)=>{
+    const el=document.getElementById(toSafeId(h));
+    if(!el) return;
+
+    const v=cols[i];
+    if(!v) return;
+
+    if(el.tagName==="SELECT"){
+      [...el.options].forEach(o=>{
+        if(o.value===v || o.text.indexOf(v)!==-1) el.value=o.value;
+      });
+    } else {
+      el.value=v;
+    }
+  });
+
+  document.getElementById("waitMsg").innerText = "붙여넣기 적용 완료!";
+  document.getElementById("waitMsg").style.display = "block";
+  setTimeout(function(){
+    document.getElementById("waitMsg").style.display = "none";
+  }, 1500);
+}
+
+/* -----------------------------------------------------------
+ *  제출 1단계: 검증 후 모달 표시
+ * ---------------------------------------------------------*/
+function submitForm(){
+
+  if(!formData || !formData.headers){
+    alert("폼을 불러오는 중입니다. 잠시 후 다시 시도하세요.");
+    return;
+  }
+
+  const sender=document.getElementById("fld_sender").value.trim();
+  const subject=document.getElementById("fld_subject").value.trim() || "SHIPPING SCHEDULE";
+
+  if(sender && !isValidEmail(sender)){
+    alert("발신자 이메일 형식이 올바르지 않습니다.");
+    return;
+  }
+
+  const required=[
+    "BULK/CNTR 구분(100)","BOOKING NO(100)","CFS(CY)코드",
+    "CALL SIGN","항구청코드","출항일(ETD)(8)"
+  ];
+
+  const dateFields=["서류마감일(100)","CARGO 마감일(8)","출항일(ETD)(8)","도착일(ETA)(8)"];
+
+  for(const h of formData.headers){
+    const id = toSafeId(h);
+    const el = document.getElementById(id);
+    if(!el) continue;
+
+    const v = el.value.trim();
+
+    if(required.indexOf(h)!==-1 && !v){
+      alert(h + " 은(는) 필수 입력값입니다.");
+      return;
+    }
+
+    if(dateFields.indexOf(h)!==-1 && v && !isValidDate(v)){
+      alert(h + " 날짜가 잘못되었습니다.");
+      return;
+    }
+  }
+
+  // ✅ 비고 별도 필수
+  const note = document.getElementById("fld_note").value.trim();
+  if(!note){
+    alert("비고 은(는) 필수 입력값입니다.");
+    return;
+  }
+
+  const manager=document.getElementById("fld_manager_email").value.trim();
+  if(!manager){
+    alert("담당자 이메일은 필수입니다.");
+    return;
+  }
+
+  const extra=document.getElementById("fld_extra_emails").value.trim();
+  if(extra){
+    for(const e of extra.split(",")){
+      const t=e.trim();
+      if(t && !isValidEmail(t)){
+        alert("잘못된 이메일: " + t);
+        return;
+      }
+    }
+  }
+
+  // ✅ values = 항목명 21개만 + 담당자 이메일
+  const values = formData.headers.map(h => {
+    const el = document.getElementById(toSafeId(h));
+    return el ? el.value.trim() : "";
+  });
+  values.push(manager);
+
+  document.getElementById("waitMsg").style.display="block";
+
+  readFilesAsBase64().then(fileData=>{
+    document.getElementById("waitMsg").style.display="none";
+
+    pendingData = {
+      values: values,
+      extra: extra,
+      note: note,
+      sender: sender,
+      subject: subject,
+      fileData: fileData
+    };
+
+    showSummary(values, extra, note, sender, subject);
+    showConfirmModal();
+  });
+}
+
+function readFilesAsBase64(){
+  return Promise.all(
+    fileStore.map(f => new Promise(resolve=>{
+      const r=new FileReader();
+      r.onload=e=>{
+        resolve({
+          name:f.name, type:f.type,
+          data:e.target.result.split(",")[1]
+        });
+      };
+      r.readAsDataURL(f);
+    }))
+  );
+}
+
+/* -----------------------------------------------------------
+ *  요약 표시
+ * ---------------------------------------------------------*/
+function showSummary(values, extra, note, sender, subject){
+  let html="";
+
+  html+=`<div class="summary-row"><span class="summary-label">이메일 제목:</span> ${subject}</div>`;
+  if(sender){
+    html+=`<div class="summary-row"><span class="summary-label">발신자 이메일:</span> ${sender}</div>`;
+  }
+
+  html+=`<hr style="margin:10px 0;">`;
+
+  formData.headers.forEach((h,i)=>{
+    html+=`<div class="summary-row"><span class="summary-label">${h}:</span> ${values[i] || ""}</div>`;
+  });
+
+  html+=`<div class="summary-row"><span class="summary-label">담당자 이메일:</span> ${values[values.length-1]}</div>`;
+
+  if(extra){
+    html+=`<div class="summary-row"><span class="summary-label">추가 CC:</span> ${extra}</div>`;
+  }
+
+  // ✅ 비고는 여기서 1번만 표시
+  if(note){
+    html+=`<div class="summary-row"><span class="summary-label">비고:</span> ${String(note).replace(/\n/g,"<br>")}</div>`;
+  }
+
+  document.getElementById("summaryArea").innerHTML = html;
+}
+
+/* -----------------------------------------------------------
+ *  모달 표시/닫기
+ * ---------------------------------------------------------*/
+function showConfirmModal(){
+  document.getElementById("confirmWait").style.display="none";
+  document.getElementById("finalSubmitBtn").disabled=false;
+  document.getElementById("confirmModal").style.display="block";
+}
+function closeConfirmModal(){
+  document.getElementById("confirmModal").style.display="none";
+}
+
+/* -----------------------------------------------------------
+ *  최종 제출 → Apps Script 함수 호출
+ * ---------------------------------------------------------*/
+function confirmSubmit(){
+  if(!pendingData) return;
+
+  document.getElementById("confirmWait").style.display="block";
+  document.getElementById("finalSubmitBtn").disabled=true;
+
+  google.script.run
+    .withSuccessHandler(()=>{
+      document.getElementById("confirmWait").style.display="none";
+      closeConfirmModal();
+      alert("제출이 완료되었습니다.");
+    })
+    .withFailureHandler(err=>{
+      document.getElementById("confirmWait").style.display="none";
+      document.getElementById("finalSubmitBtn").disabled=false;
+      alert("제출 중 오류 발생: " + err);
+    })
+    .submitData(
+      pendingData.values,
+      pendingData.extra,
+      pendingData.note,
+      pendingData.fileData,
+      pendingData.sender,
+      pendingData.subject
+    );
+}
+</script>
+
+</body>
+</html>
